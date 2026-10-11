@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import "./App.css";
 
+const API_URL = "https://broke-but-functional-swart.vercel.app";
+
 const initialTransactions = [
   { id: 1, name: "Grocery shopping", category: "Food", amount: 850, day: "Today", icon: "🛒" },
   { id: 2, name: "Metro recharge", category: "Transport", amount: 300, day: "Today", icon: "🚇" },
@@ -73,21 +75,46 @@ function App() {
   const [purchaseAmount, setPurchaseAmount] = useState("");
   const [contribution, setContribution] = useState("");
   const [goalMessage, setGoalMessage] = useState("");
+  const [apiStatus, setApiStatus] = useState("checking");
 
-  // Save changes to this browser automatically.
+  // Check the Node.js backend without replacing locally saved expenses.
+  useEffect(() => {
+    let active = true;
+
+    fetch(`${API_URL}/api/expenses`)
+      .then((response) => {
+        if (!response.ok) throw new Error("API unavailable");
+        return response.json();
+      })
+      .then(() => {
+        if (active) setApiStatus("connected");
+      })
+      .catch(() => {
+        if (active) setApiStatus("offline");
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Keep browser storage as a reliable local backup.
   useEffect(() => {
     try {
       localStorage.setItem("broke-budget", JSON.stringify(budget));
     } catch {
-      console.warn("Could not save budget in this browser.");
+      console.warn("Could not save budget locally.");
     }
   }, [budget]);
 
   useEffect(() => {
     try {
-      localStorage.setItem("broke-transactions", JSON.stringify(transactions));
+      localStorage.setItem(
+        "broke-transactions",
+        JSON.stringify(transactions)
+      );
     } catch {
-      console.warn("Could not save transactions in this browser.");
+      console.warn("Could not save expenses locally.");
     }
   }, [transactions]);
 
@@ -95,7 +122,7 @@ function App() {
     try {
       localStorage.setItem("broke-goal", JSON.stringify(goal));
     } catch {
-      console.warn("Could not save savings goal in this browser.");
+      console.warn("Could not save goal locally.");
     }
   }, [goal]);
 
@@ -103,7 +130,7 @@ function App() {
     try {
       localStorage.setItem("broke-savings", JSON.stringify(saved));
     } catch {
-      console.warn("Could not save savings in this browser.");
+      console.warn("Could not save savings locally.");
     }
   }, [saved]);
 
@@ -129,8 +156,9 @@ function App() {
     month: "long",
   });
 
-  function addTransaction(e) {
+  async function addTransaction(e) {
     e.preventDefault();
+
     const cleanName = name.trim();
     const value = Number(amount);
 
@@ -144,31 +172,84 @@ function App() {
       return;
     }
 
-    setTransactions((current) => [
-      {
-        id: `${Date.now()}-${Math.random()}`,
-        name: cleanName,
-        category,
-        amount: value,
-        day: "Just now",
-        icon: categoryIcons[category] || "💸",
-      },
-      ...current,
-    ]);
+    const clientId = `local-${Date.now()}-${Math.random()}`;
+
+    const newTransaction = {
+      id: clientId,
+      name: cleanName,
+      category,
+      amount: value,
+      day: "Just now",
+      icon: categoryIcons[category] || "💸",
+      synced: false,
+    };
+
+    // Save immediately in the browser so the UI still works if the API fails.
+    setTransactions((current) => [newTransaction, ...current]);
 
     setName("");
     setAmount("");
     setCategory("Food");
     setFormError("");
     setShowForm(false);
+
+    try {
+      const response = await fetch(`${API_URL}/api/expenses`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: cleanName,
+          category,
+          amount: value,
+        }),
+      });
+
+      if (!response.ok) throw new Error("API rejected the expense");
+
+      const remoteExpense = await response.json();
+
+      setTransactions((current) =>
+        current.map((t) =>
+          t.id === clientId
+            ? { ...t, serverId: remoteExpense.id, synced: true }
+            : t
+        )
+      );
+
+      setApiStatus("connected");
+    } catch {
+      setApiStatus("offline");
+      setFormError(
+        "Expense saved in this browser, but API sync failed. You can try again later."
+      );
+    }
   }
 
-  function deleteTransaction(id) {
-    setTransactions((current) => current.filter((t) => t.id !== id));
+  async function deleteTransaction(transaction) {
+    // Delete from the browser immediately.
+    setTransactions((current) =>
+      current.filter((t) => t.id !== transaction.id)
+    );
+
+    // Only request server deletion if this expense was created there.
+    if (transaction.serverId !== undefined) {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/expenses/${transaction.serverId}`,
+          { method: "DELETE" }
+        );
+
+        if (!response.ok) throw new Error("Could not delete remote expense");
+        setApiStatus("connected");
+      } catch {
+        setApiStatus("offline");
+      }
+    }
   }
 
   function updateBudget(value) {
     if (value === "") return;
+
     const next = Number(value);
     if (Number.isFinite(next) && next > 0 && next <= 100000000) {
       setBudget(next);
@@ -177,6 +258,15 @@ function App() {
 
   function resetMonth() {
     if (!window.confirm("Remove all transactions for a fresh start?")) return;
+
+    transactions.forEach((t) => {
+      if (t.serverId !== undefined) {
+        fetch(`${API_URL}/api/expenses/${t.serverId}`, {
+          method: "DELETE",
+        }).catch(() => {});
+      }
+    });
+
     setTransactions([]);
     setShowForm(false);
     setFormError("");
@@ -215,11 +305,13 @@ function App() {
           <span className="brand-icon">₹</span>
           <span>Broke<span className="green">.</span></span>
         </div>
+
         <div className="side-label">YOUR MONEY</div>
         <a className="nav-item active" href="#overview">▦ <span>Overview</span></a>
         <a className="nav-item" href="#transactions">↕ <span>Transactions</span></a>
         <a className="nav-item" href="#planner">◷ <span>Daily planner</span></a>
         <a className="nav-item" href="#goals">◎ <span>Savings goals</span></a>
+
         <div className="sidebar-bottom">
           <div className="avatar">B</div>
           <div><strong>Budget buddy</strong><small>Student edition</small></div>
@@ -236,6 +328,20 @@ function App() {
             {showForm ? "✕ Close form" : "＋ Add expense"}
           </button>
         </header>
+
+        <p
+          role="status"
+          style={{
+            fontSize: "0.85rem",
+            margin: "0 0 12px",
+            color: apiStatus === "connected" ? "green" : "#777",
+          }}
+        >
+          {apiStatus === "checking" && "Checking Node.js API…"}
+          {apiStatus === "connected" && "✓ Node.js API connected"}
+          {apiStatus === "offline" &&
+            "Local mode active — browser storage is still working"}
+        </p>
 
         <section className="welcome-card">
           <div>
@@ -331,7 +437,7 @@ function App() {
                       <small>{t.category} · {t.day}</small>
                     </div>
                     <strong className="transaction-amount">−{money(t.amount)}</strong>
-                    <button type="button" className="text-btn" aria-label={`Delete ${t.name}`} onClick={() => deleteTransaction(t.id)}>✕</button>
+                    <button type="button" className="text-btn" aria-label={`Delete ${t.name}`} onClick={() => deleteTransaction(t)}>✕</button>
                   </div>
                 ))
               )}
